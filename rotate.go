@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +22,7 @@ type Config struct {
 // RotatingWriter is a writer that will rotate log files when the output
 // reaches a certain size.
 type RotatingWriter struct {
+	sync.Mutex
 	outputFile  *os.File
 	currentSize int64
 	config      Config
@@ -41,7 +43,6 @@ func New(config Config) (w *RotatingWriter, err error) {
 	if err = w.openFile(); err != nil {
 		return nil, err
 	}
-	go w.listen()
 	return
 }
 
@@ -95,37 +96,25 @@ func (w *RotatingWriter) rotate() (err error) {
 	return
 }
 
-func (w *RotatingWriter) listen() {
-	for {
-		select {
-		case b := <-w.dataChan:
-			n, err := w.outputFile.Write(b)
-			if err != nil {
-				w.openFile()
-				continue
-			}
-			w.currentSize += int64(n)
-			if w.currentSize >= w.config.MaxSize {
-				w.rotate()
-			}
-		case c := <-w.quitChan:
-			if w.outputFile != nil {
-				w.outputFile.Close()
-			}
-			close(c)
-		}
-	}
-}
-
 // Write writes data to the RotatingWriter
 func (w *RotatingWriter) Write(b []byte) (int, error) {
-	w.dataChan <- b
-	return len(b), nil
+	w.Lock()
+	defer w.Unlock()
+	n, err := w.outputFile.Write(b)
+	if err != nil {
+		return 0, err
+	}
+	w.currentSize += int64(n)
+	if w.currentSize >= w.config.MaxSize {
+		err = w.rotate()
+	}
+	return n, err
 }
 
 // Close shuts down the writer
-func (w *RotatingWriter) Close() {
-	c := make(chan struct{})
-	w.quitChan <- c
-	<-c
+func (w *RotatingWriter) Close() error {
+	if w.outputFile != nil {
+		return w.outputFile.Close()
+	}
+	return nil
 }
